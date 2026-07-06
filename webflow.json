@@ -1,0 +1,7 @@
+{
+  "$comment": "Webflow-Cloud-Konfiguration. `webflow cloud init` kann diese Datei ergänzen; mountPath muss zu BASE_PATH in next.config.mjs passen.",
+  "cloud": {
+    "framework": "nextjs",
+    "mountPath": "/app"
+  }
+}

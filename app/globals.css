@@ -1,0 +1,140 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: #f4f5f7;
+  color: #1a1d21;
+  line-height: 1.5;
+}
+
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 4rem;
+}
+
+h1 {
+  font-size: 1.5rem;
+  margin: 0 0 0.25rem;
+}
+
+.subtitle {
+  color: #5a6472;
+  margin: 0 0 2rem;
+  font-size: 0.95rem;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid #e2e5ea;
+  border-radius: 10px;
+  padding: 1.25rem 1.5rem;
+  margin-bottom: 1.25rem;
+}
+
+.card h2 {
+  font-size: 1.05rem;
+  margin: 0 0 0.75rem;
+}
+
+button {
+  font: inherit;
+  border: none;
+  border-radius: 8px;
+  padding: 0.55rem 1.1rem;
+  cursor: pointer;
+  background: #146ef5;
+  color: #fff;
+  margin-right: 0.6rem;
+  margin-bottom: 0.4rem;
+}
+
+button.secondary {
+  background: #e8ecf2;
+  color: #1a1d21;
+}
+
+button.danger {
+  background: #b42318;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
+
+input[type="password"] {
+  font: inherit;
+  padding: 0.55rem 0.8rem;
+  border: 1px solid #c6cdd6;
+  border-radius: 8px;
+  width: 100%;
+  max-width: 320px;
+  margin-right: 0.6rem;
+}
+
+table.stats {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.92rem;
+}
+
+table.stats td {
+  padding: 0.3rem 0.6rem 0.3rem 0;
+  border-bottom: 1px solid #eef0f3;
+}
+
+table.stats td:first-child {
+  color: #5a6472;
+  width: 60%;
+}
+
+.badge {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.8rem;
+  margin: 0 0.35rem 0.35rem 0;
+}
+
+.badge.ok {
+  background: #e6f4ea;
+  color: #137333;
+}
+
+.badge.missing {
+  background: #fce8e6;
+  color: #b42318;
+}
+
+ul.messages {
+  margin: 0.5rem 0 0;
+  padding-left: 1.2rem;
+  font-size: 0.9rem;
+}
+
+ul.messages.warn li {
+  color: #8a6d00;
+}
+
+ul.messages.error li {
+  color: #b42318;
+}
+
+pre.result {
+  background: #0f1419;
+  color: #d7e0ea;
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  font-size: 0.8rem;
+  max-height: 420px;
+}
+
+.error-text {
+  color: #b42318;
+  font-size: 0.9rem;
+}

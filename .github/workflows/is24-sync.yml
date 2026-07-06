@@ -1,0 +1,73 @@
+# Ruft den geschützten Sync-Endpunkt der Webflow-Cloud-App regelmäßig auf.
+#
+# Benötigte GitHub Secrets:
+#   WEBFLOW_SYNC_URL    z. B. https://example.webflow.io/app/api/sync
+#   WEBFLOW_SYNC_SECRET identisch mit SYNC_SECRET der Webflow-Cloud-App
+name: IS24 → Webflow Sync
+
+on:
+  schedule:
+    # Alle 3 Stunden zur Minute 17 (vermeidet Lastspitzen zur vollen Stunde).
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      dryRun:
+        description: "Dry Run (keine Webflow-Schreibzugriffe)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: is24-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Sync-Endpunkt aufrufen
+        env:
+          SYNC_URL: ${{ secrets.WEBFLOW_SYNC_URL }}
+          SYNC_SECRET: ${{ secrets.WEBFLOW_SYNC_SECRET }}
+          DRY_RUN_INPUT: ${{ inputs.dryRun }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${SYNC_URL:-}" ] || [ -z "${SYNC_SECRET:-}" ]; then
+            echo "::error::GitHub Secrets WEBFLOW_SYNC_URL / WEBFLOW_SYNC_SECRET sind nicht gesetzt."
+            exit 1
+          fi
+
+          url="$SYNC_URL"
+          if [ "${DRY_RUN_INPUT:-false}" = "true" ]; then
+            case "$url" in
+              *\?*) url="${url}&dryRun=true" ;;
+              *)    url="${url}?dryRun=true" ;;
+            esac
+          fi
+
+          http_status=0
+          response=$(curl --silent --show-error --fail-with-body \
+            --retry 3 --retry-delay 15 --retry-all-errors \
+            --connect-timeout 20 --max-time 900 \
+            -X POST "$url" \
+            -H "Authorization: Bearer $SYNC_SECRET" \
+            -H "Content-Type: application/json") || http_status=$?
+
+          echo "── Sync-Antwort ──────────────────────────────────────"
+          # Formatiert ausgeben; Secret kommt in der Antwort nie vor.
+          echo "$response" | jq . 2>/dev/null || echo "$response"
+
+          if [ "$http_status" -ne 0 ]; then
+            echo "::error::Sync-Aufruf fehlgeschlagen (curl exit $http_status)."
+            exit "$http_status"
+          fi
+
+          success=$(echo "$response" | jq -r '.success // false' 2>/dev/null || echo "false")
+          if [ "$success" != "true" ]; then
+            echo "::error::Sync meldete success=false — Details siehe Antwort oben."
+            exit 1
+          fi
