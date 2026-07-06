@@ -1,7 +1,12 @@
-// BASE_PATH muss dem Mount-Path der Webflow-Cloud-App entsprechen (z. B. "/app").
-// Er ist der einzige build-zeitige Env-Wert; alle Secrets werden ausschließlich
-// zur Laufzeit gelesen (siehe lib/config.ts).
-const basePath = process.env.BASE_PATH ?? "";
+// basePath muss dem Mount-Path der Webflow-Cloud-App entsprechen.
+// Der Webflow-Cloud-Builder stellt ihn als COSMIC_MOUNT_PATH bereit;
+// BASE_PATH kann ihn explizit überschreiben (z. B. für lokale Builds).
+// Es ist der einzige build-zeitige Env-Wert; alle Secrets werden
+// ausschließlich zur Laufzeit gelesen (siehe lib/config.ts).
+//
+// Wichtig: keine top-level awaits in dieser Datei — der Webflow-Cloud-
+// Builder lädt sie per require() (ERR_REQUIRE_ASYNC_MODULE).
+const basePath = process.env.BASE_PATH ?? process.env.COSMIC_MOUNT_PATH ?? "";
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
@@ -15,11 +20,3 @@ const nextConfig = {
 };
 
 export default nextConfig;
-
-// Lokale Entwicklung mit Cloudflare-Bindings (no-op im reinen Next-Build).
-try {
-  const { initOpenNextCloudflareForDev } = await import("@opennextjs/cloudflare");
-  initOpenNextCloudflareForDev();
-} catch {
-  // @opennextjs/cloudflare ist nur als devDependency vorhanden.
-}
