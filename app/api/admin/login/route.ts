@@ -1,7 +1,7 @@
 import { isProduction } from "@/app/api/admin/_lib";
 import {
   createSessionToken,
-  isSameOrigin,
+  isTrustedOrigin,
   safeEqual,
   sessionCookieHeader,
 } from "@/lib/security/session";
@@ -18,7 +18,7 @@ export async function POST(req: Request): Promise<Response> {
       { status: 500 },
     );
   }
-  if (!isSameOrigin(req)) {
+  if (!isTrustedOrigin(req, process.env.ADMIN_ALLOWED_ORIGINS)) {
     return Response.json({ success: false, errors: ["Ungültiger Origin"] }, { status: 403 });
   }
 

@@ -1,29 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { createSessionToken, isSameOrigin, verifySessionToken } from "@/lib/security/session";
+import { createSessionToken, isTrustedOrigin, verifySessionToken } from "@/lib/security/session";
 
 const req = (headers: Record<string, string>) =>
-  new Request("https://example.com/api/admin/run", { method: "POST", headers });
+  new Request("https://internal.webflow.services/api/admin/run", { method: "POST", headers });
 
-describe("isSameOrigin", () => {
-  it("akzeptiert Origin, der dem Host entspricht", () => {
-    expect(isSameOrigin(req({ origin: "https://site.tld", host: "site.tld" }))).toBe(true);
-  });
-
-  it("akzeptiert Origin über X-Forwarded-Host (Proxy wie Webflow Cloud)", () => {
+describe("isTrustedOrigin", () => {
+  it("akzeptiert Webflow-Domains per Default, auch wenn der Host intern umgeschrieben ist", () => {
+    // Genau der Webflow-Cloud-Fall: Origin öffentlich, Host intern.
     expect(
-      isSameOrigin(
-        req({
-          origin: "https://site.webflow.io",
-          host: "worker.internal",
-          "x-forwarded-host": "site.webflow.io",
-        }),
-      ),
+      isTrustedOrigin(req({ origin: "https://neuefinanzkultur-575ede.webflow.io", host: "abc.webflow.services" })),
     ).toBe(true);
   });
 
   it("lehnt fremde Origins und fehlenden Origin ab", () => {
-    expect(isSameOrigin(req({ origin: "https://evil.tld", host: "site.tld" }))).toBe(false);
-    expect(isSameOrigin(req({ host: "site.tld" }))).toBe(false);
+    expect(isTrustedOrigin(req({ origin: "https://evil.tld" }))).toBe(false);
+    expect(isTrustedOrigin(req({ host: "abc.webflow.services" }))).toBe(false);
+  });
+
+  it("erzwingt bei konfigurierter Allowlist exakte Host-Übereinstimmung", () => {
+    const allow = "https://immobilien.neuefinanzkultur.de";
+    expect(isTrustedOrigin(req({ origin: "https://immobilien.neuefinanzkultur.de" }), allow)).toBe(true);
+    // Mit gesetzter Allowlist zählt die Default-Webflow-Freigabe nicht mehr.
+    expect(isTrustedOrigin(req({ origin: "https://site.webflow.io" }), allow)).toBe(false);
+  });
+
+  it("akzeptiert Allowlist-Einträge mit und ohne Schema", () => {
+    expect(isTrustedOrigin(req({ origin: "https://a.de" }), "a.de, b.de")).toBe(true);
+    expect(isTrustedOrigin(req({ origin: "https://b.de" }), "a.de, b.de")).toBe(true);
+    expect(isTrustedOrigin(req({ origin: "https://c.de" }), "a.de, b.de")).toBe(false);
   });
 });
 

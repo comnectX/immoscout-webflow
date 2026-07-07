@@ -120,38 +120,38 @@ export async function safeEqual(a: string, b: string): Promise<boolean> {
   return diff === 0;
 }
 
+// Webflow-eigene Domains. Hinter dem Webflow-Cloud-Proxy wird der öffentliche
+// Host verworfen (Host/X-Forwarded-Host zeigen auf einen internen *.webflow.services-
+// Namen), sodass "Origin == eigener Host" nicht prüfbar ist. Wir prüfen die Origin
+// daher gegen eine Allowlist; die eigentliche CSRF-Absicherung liefert das
+// HttpOnly-/SameSite=Strict-Session-Cookie.
+const DEFAULT_TRUSTED_SUFFIXES = [".webflow.io", ".webflow.services"];
+
+function hostFromOriginLike(value: string): string | null {
+  try {
+    return new URL(value.includes("://") ? value : `https://${value}`).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Origin-Prüfung für schreibende Browser-Requests (CSRF-Schutz).
- * Hinter dem Webflow-Cloud-Proxy steht der externe Host in X-Forwarded-Host,
- * während Host intern umgeschrieben sein kann — beide gelten als vertrauenswürdig.
+ * Origin-Prüfung für schreibende Browser-Requests (CSRF-Schutz, Defense-in-Depth).
+ * allowedOrigins (kommagetrennt, z. B. aus ADMIN_ALLOWED_ORIGINS) hat Vorrang und
+ * erlaubt exakte Host-Freigaben (etwa eine Custom-Domain). Ohne Konfiguration
+ * werden Webflow-eigene Domains akzeptiert.
  */
-export function isSameOrigin(req: Request): boolean {
+export function isTrustedOrigin(req: Request, allowedOrigins?: string | null): boolean {
   const origin = req.headers.get("origin");
   if (!origin) return false;
+  const host = hostFromOriginLike(origin);
+  if (!host) return false;
 
-  const candidates: string[] = [];
-  for (const header of ["host", "x-forwarded-host", "x-original-host"]) {
-    const value = req.headers.get(header);
-    if (value) candidates.push(...value.split(","));
-  }
-  // RFC-7239-Forwarded-Header: Forwarded: for=...;host=example.com;proto=https
-  const forwarded = req.headers.get("forwarded");
-  if (forwarded) {
-    for (const match of forwarded.matchAll(/host="?([^";,\s]+)"?/gi)) {
-      if (match[1]) candidates.push(match[1]);
-    }
-  }
-  // Host der Request-URL, wie die Runtime sie rekonstruiert.
-  try {
-    candidates.push(new URL(req.url).host);
-  } catch {
-    // req.url ist in allen realen Runtimes eine absolute URL
-  }
+  const configured = (allowedOrigins ?? "")
+    .split(",")
+    .map((s) => hostFromOriginLike(s.trim()))
+    .filter((h): h is string => Boolean(h));
+  if (configured.length > 0) return configured.includes(host);
 
-  const hosts = candidates.map((h) => h.trim().toLowerCase()).filter((h) => h.length > 0);
-  try {
-    return hosts.includes(new URL(origin).host.toLowerCase());
-  } catch {
-    return false;
-  }
+  return DEFAULT_TRUSTED_SUFFIXES.some((suffix) => host === suffix.slice(1) || host.endsWith(suffix));
 }

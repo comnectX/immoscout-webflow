@@ -1,4 +1,4 @@
-import { isSameOrigin, SESSION_COOKIE, verifySessionToken } from "@/lib/security/session";
+import { isTrustedOrigin, SESSION_COOKIE, verifySessionToken } from "@/lib/security/session";
 
 export function isProduction(): boolean {
   return process.env.NODE_ENV === "production";
@@ -26,7 +26,7 @@ export async function requireAdminSession(req: Request): Promise<Response | null
       { status: 500 },
     );
   }
-  if (!isSameOrigin(req)) {
+  if (!isTrustedOrigin(req, process.env.ADMIN_ALLOWED_ORIGINS)) {
     return Response.json({ success: false, errors: ["Ungültiger Origin"] }, { status: 403 });
   }
   const valid = await verifySessionToken(readSessionCookie(req), syncSecret, adminPassword);
