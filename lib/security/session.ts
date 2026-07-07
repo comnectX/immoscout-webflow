@@ -128,10 +128,27 @@ export async function safeEqual(a: string, b: string): Promise<boolean> {
 export function isSameOrigin(req: Request): boolean {
   const origin = req.headers.get("origin");
   if (!origin) return false;
-  const hosts = [req.headers.get("host"), req.headers.get("x-forwarded-host")]
-    .flatMap((h) => (h ? h.split(",") : []))
-    .map((h) => h.trim().toLowerCase())
-    .filter((h) => h.length > 0);
+
+  const candidates: string[] = [];
+  for (const header of ["host", "x-forwarded-host", "x-original-host"]) {
+    const value = req.headers.get(header);
+    if (value) candidates.push(...value.split(","));
+  }
+  // RFC-7239-Forwarded-Header: Forwarded: for=...;host=example.com;proto=https
+  const forwarded = req.headers.get("forwarded");
+  if (forwarded) {
+    for (const match of forwarded.matchAll(/host="?([^";,\s]+)"?/gi)) {
+      if (match[1]) candidates.push(match[1]);
+    }
+  }
+  // Host der Request-URL, wie die Runtime sie rekonstruiert.
+  try {
+    candidates.push(new URL(req.url).host);
+  } catch {
+    // req.url ist in allen realen Runtimes eine absolute URL
+  }
+
+  const hosts = candidates.map((h) => h.trim().toLowerCase()).filter((h) => h.length > 0);
   try {
     return hosts.includes(new URL(origin).host.toLowerCase());
   } catch {
