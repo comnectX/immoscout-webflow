@@ -120,13 +120,20 @@ export async function safeEqual(a: string, b: string): Promise<boolean> {
   return diff === 0;
 }
 
-/** Origin-Prüfung für schreibende Browser-Requests (CSRF-Schutz). */
+/**
+ * Origin-Prüfung für schreibende Browser-Requests (CSRF-Schutz).
+ * Hinter dem Webflow-Cloud-Proxy steht der externe Host in X-Forwarded-Host,
+ * während Host intern umgeschrieben sein kann — beide gelten als vertrauenswürdig.
+ */
 export function isSameOrigin(req: Request): boolean {
   const origin = req.headers.get("origin");
-  const host = req.headers.get("host");
-  if (!origin || !host) return false;
+  if (!origin) return false;
+  const hosts = [req.headers.get("host"), req.headers.get("x-forwarded-host")]
+    .flatMap((h) => (h ? h.split(",") : []))
+    .map((h) => h.trim().toLowerCase())
+    .filter((h) => h.length > 0);
   try {
-    return new URL(origin).host === host;
+    return hosts.includes(new URL(origin).host.toLowerCase());
   } catch {
     return false;
   }

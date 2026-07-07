@@ -2,11 +2,17 @@
 
 import { useCallback, useEffect, useState } from "react";
 
-// basePath wird beim Build eingebettet (kein Secret).
-const BP = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+// basePath zur Laufzeit aus der eigenen URL ableiten: Die Admin-Seite liegt
+// unter `${basePath}/admin`, unabhängig davon, unter welchem Mount-Path die
+// App deployt ist. (Build-zeitige Env-Inlining-Werte überlebt der
+// Webflow-Cloud-Builder nicht zuverlässig.)
+function basePath(): string {
+  if (typeof window === "undefined") return "";
+  return window.location.pathname.replace(/\/admin\/?(?:[?#].*)?$/, "");
+}
 
 async function postJson(path: string, body: unknown): Promise<{ status: number; data: unknown }> {
-  const res = await fetch(`${BP}${path}`, {
+  const res = await fetch(`${basePath()}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -105,7 +111,7 @@ export function AdminPanel() {
 
   const loadStatus = useCallback(async () => {
     try {
-      const res = await fetch(`${BP}/api/admin/status`, { credentials: "same-origin" });
+      const res = await fetch(`${basePath()}/api/admin/status`, { credentials: "same-origin" });
       if (res.status === 401) {
         window.location.reload();
         return;
