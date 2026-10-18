@@ -27,6 +27,7 @@ export interface WebflowItem {
   isDraft: boolean;
   isArchived: boolean;
   lastPublished?: string | null;
+  createdOn?: string;
   fieldData: Record<string, unknown>;
 }
 

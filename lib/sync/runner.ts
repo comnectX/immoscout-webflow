@@ -29,6 +29,7 @@ export async function executeSyncRun(
     inactiveAction: overrides.inactiveAction ?? cfg.inactiveActionDefault,
     maxConcurrency: cfg.maxConcurrency,
     fieldMapOverride: cfg.fieldMapOverride,
+    timeBudgetMs: cfg.timeBudgetMs,
   };
 
   const is24 = new Is24Client(cfg, logger);
@@ -53,6 +54,8 @@ export async function executeSyncRun(
     unchanged: report.unchangedCount,
     unpublished: report.unpublishCount,
     errors: report.errorCount,
+    complete: report.complete,
+    pending: report.pendingCount,
   });
   return report;
 }

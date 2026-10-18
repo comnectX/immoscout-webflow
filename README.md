@@ -25,7 +25,7 @@ ImmoScout24 API  ──▶  Webflow-Cloud-App (Next.js auf Cloudflare Workers)  
 | `lib/security/redact.ts` | Secret-Redaktion in allen Logs und Fehlermeldungen |
 | `app/api/*` | `/api/health`, `/api/diagnostics`, `/api/sync`, Admin-Routen |
 | `app/admin` | Deutschsprachige Admin-Oberfläche |
-| `.github/workflows/is24-sync.yml` | Scheduler (alle 3 Stunden, Minute 17) |
+| `.github/workflows/is24-sync.yml` | Scheduler (täglich 04:17 UTC, ruft nach, bis der Sync vollständig ist) |
 
 **Grundprinzipien**
 
@@ -131,7 +131,10 @@ Lokal entwickeln: `.env.example` → `.env` kopieren, `npm install`, `npm run de
 6. **GitHub Secrets** im Repo anlegen:
    - `WEBFLOW_SYNC_URL` = `https://IHRE-DOMAIN/app/api/sync`
    - `WEBFLOW_SYNC_SECRET` = Wert von `SYNC_SECRET`
-7. **Zeitplan aktiv:** Der Workflow `.github/workflows/is24-sync.yml` läuft automatisch alle 3 Stunden (Minute 17, vermeidet Lastspitzen) und kann per **Actions → IS24 → Webflow Sync → Run workflow** manuell (auch als Dry Run) gestartet werden.
+7. **Zeitplan aktiv:** Der Workflow `.github/workflows/is24-sync.yml` läuft automatisch einmal täglich (04:17 UTC) und kann per **Actions → IS24 → Webflow Sync → Run workflow** manuell (auch als Dry Run) gestartet werden.
+   - **Zeitbudget:** Webflow Cloud bricht Requests nach ~100 s mit `504 Gateway time-out` ab. Jeder Aufruf arbeitet daher höchstens `SYNC_TIME_BUDGET_SECONDS` (Default 45) und antwortet mit `"complete": false`, wenn noch Inserate ausstehen; der Workflow ruft dann erneut auf.
+   - **Keine Sofort-Retries:** Ein 504 beendet den Sync serverseitig nicht. Ein sofortiger Wiederholungsaufruf würde parallel laufen und doppelte Items anlegen. Der Workflow wartet deshalb nach 5xx/Timeout 150 s. Sollten trotzdem Duplikate (gleiche `is24-id`) entstehen, nimmt der nächste Lauf die überzähligen live Kopien automatisch offline.
+   - **Keepalive:** GitHub deaktiviert geplante Workflows nach 60 Tagen ohne Commit. Der Workflow aktiviert sich bei jedem Lauf per API selbst neu (benötigt `permissions: actions: write`).
 
 ## 5. API-Referenz
 

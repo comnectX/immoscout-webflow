@@ -1,14 +1,23 @@
-# Ruft den geschützten Sync-Endpunkt der Webflow-Cloud-App regelmäßig auf.
+# Ruft den geschützten Sync-Endpunkt der Webflow-Cloud-App einmal täglich auf.
 #
 # Benötigte GitHub Secrets:
 #   WEBFLOW_SYNC_URL    z. B. https://example.webflow.io/app/api/sync
 #   WEBFLOW_SYNC_SECRET identisch mit SYNC_SECRET der Webflow-Cloud-App
+#
+# Ablauf: Jeder Aufruf arbeitet höchstens SYNC_TIME_BUDGET_SECONDS und meldet
+# "complete": false, wenn noch Inserate ausstehen. Der Job ruft dann erneut auf,
+# bis alles synchronisiert ist (max. MAX_ROUNDS Aufrufe).
+#
+# WICHTIG: Bei 5xx/Timeout wird NICHT sofort wiederholt. Ein 504 vom Gateway
+# heißt nicht, dass der Sync abgebrochen ist — er läuft serverseitig weiter.
+# Ein sofortiger Retry startet einen zweiten, parallelen Sync und erzeugt
+# doppelte CMS-Items. Stattdessen wird gewartet, bis der Lauf sicher beendet ist.
 name: IS24 → Webflow Sync
 
 on:
   schedule:
-    # Alle 3 Stunden zur Minute 17 (vermeidet Lastspitzen zur vollen Stunde).
-    - cron: "17 */3 * * *"
+    # Täglich 04:17 UTC (06:17 MESZ / 05:17 MEZ), vor Arbeitsbeginn.
+    - cron: "17 4 * * *"
   workflow_dispatch:
     inputs:
       dryRun:
@@ -18,6 +27,8 @@ on:
 
 permissions:
   contents: read
+  # Für den Keepalive-Schritt (Workflow aktiv halten).
+  actions: write
 
 concurrency:
   group: is24-sync
@@ -27,14 +38,26 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      MAX_ROUNDS: 10
+      # Wartezeit nach 5xx/Timeout, damit ein serverseitig weiterlaufender
+      # Sync sicher beendet ist, bevor der nächste startet.
+      COOLDOWN_SECONDS: 150
     steps:
+      - name: Workflow aktiv halten
+        # GitHub deaktiviert geplante Workflows nach 60 Tagen ohne Commit.
+        # Das erneute Aktivieren per API setzt diese Frist zurück.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/is24-sync.yml/enable" || echo "::warning::Keepalive fehlgeschlagen"
+
       - name: Sync-Endpunkt aufrufen
         env:
           SYNC_URL: ${{ secrets.WEBFLOW_SYNC_URL }}
           SYNC_SECRET: ${{ secrets.WEBFLOW_SYNC_SECRET }}
           DRY_RUN_INPUT: ${{ inputs.dryRun }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           if [ -z "${SYNC_URL:-}" ] || [ -z "${SYNC_SECRET:-}" ]; then
             echo "::error::GitHub Secrets WEBFLOW_SYNC_URL / WEBFLOW_SYNC_SECRET sind nicht gesetzt."
@@ -49,25 +72,38 @@ jobs:
             esac
           fi
 
-          http_status=0
-          response=$(curl --silent --show-error --fail-with-body \
-            --retry 3 --retry-delay 15 --retry-all-errors \
-            --connect-timeout 20 --max-time 900 \
-            -X POST "$url" \
-            -H "Authorization: Bearer $SYNC_SECRET" \
-            -H "Content-Type: application/json") || http_status=$?
+          for round in $(seq 1 "$MAX_ROUNDS"); do
+            echo "── Aufruf $round/$MAX_ROUNDS ───────────────────────────────────"
+            # Bewusst ohne --retry: curl würde sonst auch bei 504 sofort wiederholen.
+            http_code=$(curl --silent --show-error \
+              --connect-timeout 20 --max-time 120 \
+              -o response.json -w '%{http_code}' \
+              -X POST "$url" \
+              -H "Authorization: Bearer $SYNC_SECRET" \
+              -H "Content-Type: application/json") || http_code="000"
 
-          echo "── Sync-Antwort ──────────────────────────────────────"
-          # Formatiert ausgeben; Secret kommt in der Antwort nie vor.
-          echo "$response" | jq . 2>/dev/null || echo "$response"
+            if ! jq -e . response.json >/dev/null 2>&1; then
+              echo "::warning::HTTP $http_code ohne JSON-Antwort (Gateway-Timeout o. ä.) — warte ${COOLDOWN_SECONDS}s, bis der Lauf serverseitig sicher beendet ist."
+              head -c 300 response.json 2>/dev/null; echo
+              sleep "$COOLDOWN_SECONDS"
+              continue
+            fi
 
-          if [ "$http_status" -ne 0 ]; then
-            echo "::error::Sync-Aufruf fehlgeschlagen (curl exit $http_status)."
-            exit "$http_status"
-          fi
+            # Kurzfassung statt kompletter Item-Listen.
+            jq '{success, complete, pendingCount, dryRun, sourceCount, createCount, updateCount, unchangedCount, unpublishCount, durationMs, warnings, errors}' response.json
 
-          success=$(echo "$response" | jq -r '.success // false' 2>/dev/null || echo "false")
-          if [ "$success" != "true" ]; then
-            echo "::error::Sync meldete success=false — Details siehe Antwort oben."
-            exit 1
-          fi
+            success=$(jq -r '.success // false' response.json)
+            complete=$(jq -r '.complete // true' response.json)
+
+            if [ "$success" != "true" ]; then
+              echo "::error::Sync meldete success=false (HTTP $http_code) — Details siehe Antwort oben."
+              exit 1
+            fi
+            if [ "$complete" = "true" ]; then
+              echo "Sync vollständig nach $round Aufruf(en)."
+              exit 0
+            fi
+          done
+
+          echo "::error::Sync nach $MAX_ROUNDS Aufrufen nicht vollständig — Rest folgt beim nächsten Lauf."
+          exit 1

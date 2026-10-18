@@ -7,6 +7,13 @@ export interface ItemRef {
 
 export interface SyncReport {
   success: boolean;
+  /**
+   * false, wenn das Zeitbudget erschöpft war und noch Writes ausstehen —
+   * der Aufrufer ruft dann erneut auf (der Hash-Diff macht dort weiter).
+   */
+  complete: boolean;
+  /** Anzahl der in diesem Lauf nicht mehr verarbeiteten Writes/Unpublishes. */
+  pendingCount: number;
   dryRun: boolean;
   runId: string;
   sourceCount: number;
@@ -39,6 +46,7 @@ export class ReportBuilder {
   readonly errors: string[] = [];
   sourceCount = 0;
   existingWebflowCount = 0;
+  pendingCount = 0;
 
   constructor(
     private readonly runId: string,
@@ -58,6 +66,8 @@ export class ReportBuilder {
   build(success: boolean): SyncReport {
     return {
       success,
+      complete: this.pendingCount === 0,
+      pendingCount: this.pendingCount,
       dryRun: this.dryRun,
       runId: this.runId,
       sourceCount: this.sourceCount,
