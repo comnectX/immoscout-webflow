@@ -88,6 +88,8 @@ interface ReportLike {
   updateCount?: number;
   unchangedCount?: number;
   unpublishCount?: number;
+  complete?: boolean;
+  pendingCount?: number;
   durationMs?: number;
   warnings?: string[];
   errors?: string[];
@@ -222,6 +224,9 @@ export function AdminPanel() {
                 <tr><td>Aktualisiert</td><td>{report.updateCount}</td></tr>
                 <tr><td>Unverändert</td><td>{report.unchangedCount}</td></tr>
                 <tr><td>Unveröffentlicht</td><td>{report.unpublishCount}</td></tr>
+                {report.complete === false && (
+                  <tr><td>Noch ausstehend</td><td>{report.pendingCount} (erneut synchronisieren)</td></tr>
+                )}
                 <tr><td>Dauer</td><td>{report.durationMs} ms</td></tr>
               </tbody>
             </table>

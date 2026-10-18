@@ -24,6 +24,8 @@ export interface AppConfig {
   syncImagesDefault: boolean;
   inactiveActionDefault: InactiveAction;
   maxConcurrency: number;
+  /** Zeitbudget pro Sync-Aufruf in ms (hält Aufrufe unter dem Gateway-Timeout). */
+  timeBudgetMs: number;
 
   /** Optionales Override des Feld-Mappings (partiell, überschreibt Defaults). */
   fieldMapOverride: Record<string, string> | null;
@@ -70,6 +72,13 @@ const envSchema = z.object({
     .transform((v) => {
       const n = v ? Number.parseInt(v, 10) : 3;
       return Number.isFinite(n) && n >= 1 && n <= 10 ? n : 3;
+    }),
+  SYNC_TIME_BUDGET_SECONDS: z
+    .string()
+    .optional()
+    .transform((v) => {
+      const n = v ? Number.parseInt(v, 10) : 45;
+      return Number.isFinite(n) && n >= 10 && n <= 600 ? n : 45;
     }),
 
   WEBFLOW_FIELD_MAP_JSON: z.string().optional(),
@@ -122,6 +131,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     syncImagesDefault: e.SYNC_IMAGES,
     inactiveActionDefault: e.INACTIVE_ACTION,
     maxConcurrency: e.MAX_CONCURRENCY,
+    timeBudgetMs: e.SYNC_TIME_BUDGET_SECONDS * 1000,
     fieldMapOverride,
   };
 }
@@ -145,6 +155,7 @@ export function configPresence(env: Record<string, string | undefined> = process
     "SYNC_IMAGES",
     "INACTIVE_ACTION",
     "MAX_CONCURRENCY",
+    "SYNC_TIME_BUDGET_SECONDS",
     "WEBFLOW_FIELD_MAP_JSON",
   ] as const;
   return Object.fromEntries(

@@ -19,6 +19,13 @@ export interface SyncOptions {
   inactiveAction: InactiveAction;
   maxConcurrency: number;
   fieldMapOverride: FieldMap | null;
+  /**
+   * Zeitbudget pro Lauf in ms (0/undefined = unbegrenzt). Ist es erschöpft,
+   * werden keine weiteren Blöcke begonnen; der Bericht meldet complete=false
+   * und der nächste Aufruf macht über den Hash-Diff dort weiter. Hält jeden
+   * Aufruf unter dem Gateway-Timeout (Cloudflare 504 nach ~100 s).
+   */
+  timeBudgetMs?: number;
 }
 
 export interface SyncDeps {
@@ -56,6 +63,8 @@ export async function runSync(deps: SyncDeps, opts: SyncOptions, runId: string):
 
 async function execute(deps: SyncDeps, opts: SyncOptions, report: ReportBuilder): Promise<SyncReport> {
   const { source, webflow, imageResolver, logger } = deps;
+  const deadline = opts.timeBudgetMs ? Date.now() + opts.timeBudgetMs : Number.POSITIVE_INFINITY;
+  const outOfTime = () => Date.now() >= deadline;
 
   // 1+2: Collection-Schema laden und Mapping validieren (wirft MappingError,
   // wenn is24-id/name/slug fehlen — vor jeglichen Schreibzugriffen).
@@ -70,7 +79,7 @@ async function execute(deps: SyncDeps, opts: SyncOptions, report: ReportBuilder)
   // 3+4: Alle vorhandenen Items (inkl. Entwürfe) laden, Map über is24-id.
   const existingItems = await webflow.listAllItems();
   report.existingWebflowCount = existingItems.length;
-  const byIs24Id = new Map<string, WebflowItem>();
+  const groups = new Map<string, WebflowItem[]>();
   const existingSlugs = new Set<string>();
   for (const item of existingItems) {
     const slug = item.fieldData.slug;
@@ -78,13 +87,26 @@ async function execute(deps: SyncDeps, opts: SyncOptions, report: ReportBuilder)
     const rawId = item.fieldData[mapping.idSlug];
     if (typeof rawId !== "string" || rawId.trim() === "") continue; // manuell erstellte Items: unantastbar
     const is24Id = rawId.trim();
-    if (byIs24Id.has(is24Id)) {
+    const group = groups.get(is24Id);
+    if (group) group.push(item);
+    else groups.set(is24Id, [item]);
+  }
+
+  // Duplikate (mehrere Items mit derselben is24-id): das veröffentlichte bzw.
+  // älteste Item bleibt maßgeblich, weitere live Kopien werden unten
+  // unveröffentlicht (nie gelöscht).
+  const byIs24Id = new Map<string, WebflowItem>();
+  const duplicatesToRetire: Array<[string, WebflowItem]> = [];
+  for (const [is24Id, group] of groups) {
+    const [canonical, ...rest] = [...group].sort(compareCanonical);
+    byIs24Id.set(is24Id, canonical!);
+    for (const dup of rest) {
       report.warn(
-        `Duplikat in Webflow: mehrere Items mit is24-id "${is24Id}" (Item ${item.id} wird ignoriert) — bitte manuell bereinigen`,
+        `Duplikat in Webflow: mehrere Items mit is24-id "${is24Id}" — Item ${dup.id} wird ignoriert` +
+          (dup.isDraft ? "" : " und unveröffentlicht"),
       );
-      continue;
+      if (!dup.isDraft) duplicatesToRetire.push([is24Id, dup]);
     }
-    byIs24Id.set(is24Id, item);
   }
 
   // 5–7: IS24 vollständig abrufen und normalisieren. Wirft bei Auth-Fehlern,
@@ -145,17 +167,19 @@ async function execute(deps: SyncDeps, opts: SyncOptions, report: ReportBuilder)
     ...fetchResult.listings.map((l) => l.id),
     ...fetchResult.failedIds,
   ]);
-  const stale = [...byIs24Id.entries()].filter(([id]) => !sourceIds.has(id));
+  // Bereits unveröffentlichte Items (Entwürfe) sind schon offline — sie bei
+  // jedem Lauf erneut zu unpublishen kostet nur Zeit und API-Calls.
+  const stale = [...byIs24Id.entries()].filter(([id, item]) => !sourceIds.has(id) && !item.isDraft);
 
   const nowIso = new Date().toISOString();
 
-  // Bilder nur für Items auflösen, die tatsächlich geschrieben werden —
-  // unveränderte Inserate lösen keine Downloads/Uploads aus.
-  const writes = [...toCreate, ...toUpdate];
+  // Bilder werden pro Block nur für Items aufgelöst, die tatsächlich
+  // geschrieben werden — unveränderte Inserate lösen keine Downloads/Uploads aus.
   const imagesByListing = new Map<string, Awaited<ReturnType<ImageResolver["resolve"]>>>();
-  if (opts.syncImages && !opts.dryRun) {
+  const resolveImages = async (plans: PlannedWrite[]) => {
+    if (!opts.syncImages || opts.dryRun) return;
     const resolved = await pMap(
-      writes,
+      plans,
       async (plan) => ({ id: plan.listing.id, images: await imageResolver.resolve(plan.listing) }),
       opts.maxConcurrency,
     );
@@ -163,7 +187,7 @@ async function execute(deps: SyncDeps, opts: SyncOptions, report: ReportBuilder)
       imagesByListing.set(id, images);
       images.warnings.forEach((w) => report.warn(w));
     }
-  }
+  };
 
   const fieldDataFor = (plan: PlannedWrite): Record<string, unknown> => {
     const images = imagesByListing.get(plan.listing.id);
@@ -211,61 +235,107 @@ async function execute(deps: SyncDeps, opts: SyncOptions, report: ReportBuilder)
     return report.build(report.errors.length === 0);
   }
 
-  // ── 9: Neue Inserate staged anlegen ────────────────────────────────────────
-  const publishIds: string[] = [];
-  if (toCreate.length > 0) {
-    const createPayloads: WebflowItemWrite[] = toCreate.map((plan) => {
-      let slug = buildListingSlug(plan.listing.title, plan.listing.id);
-      if (existingSlugs.has(slug)) slug = `${slug}-2`;
-      existingSlugs.add(slug);
-      return {
+  // ── 9–11: Writes in kleinen Blöcken (Bilder → Create/Update → Publish) ────
+  // Jeder Block ist für sich abgeschlossen und veröffentlicht. Ist das
+  // Zeitbudget erschöpft, wird kein neuer Block begonnen; der nächste Lauf
+  // findet die restlichen Inserate über den Hash-Diff wieder.
+  const writes = [...toCreate, ...toUpdate];
+  const blockSize = Math.max(1, opts.maxConcurrency * 2);
+  for (let i = 0; i < writes.length; i += blockSize) {
+    if (outOfTime()) {
+      const remaining = writes.length - i;
+      report.pendingCount += remaining;
+      report.warn(`Zeitbudget erschöpft — ${remaining} Inserate werden im nächsten Aufruf geschrieben`);
+      break;
+    }
+    await writeBlock(writes.slice(i, i + blockSize));
+  }
+
+  async function writeBlock(block: PlannedWrite[]): Promise<void> {
+    await resolveImages(block);
+    const publishIds: string[] = [];
+
+    // 9: Neue Inserate staged anlegen
+    const creates = block.filter((plan) => !plan.existing);
+    if (creates.length > 0) {
+      const createPayloads: WebflowItemWrite[] = creates.map((plan) => {
+        let slug = buildListingSlug(plan.listing.title, plan.listing.id);
+        if (existingSlugs.has(slug)) slug = `${slug}-2`;
+        existingSlugs.add(slug);
+        return {
+          isDraft: false,
+          isArchived: false,
+          fieldData: { ...fieldDataFor(plan), slug },
+        };
+      });
+      const createdItems = await webflow.createItems(createPayloads);
+      createdItems.forEach((item, i) => {
+        const plan = creates[i];
+        if (!plan) return;
+        publishIds.push(item.id);
+        report.created.push({
+          is24Id: plan.listing.id,
+          title: plan.listing.title,
+          slug: typeof item.fieldData?.slug === "string" ? item.fieldData.slug : undefined,
+          webflowItemId: item.id,
+        });
+      });
+      logger.info(`${createdItems.length} Items staged erstellt`);
+    }
+
+    // 10: Geänderte Inserate staged aktualisieren (Slug bleibt stabil)
+    const updates = block.filter((plan) => plan.existing);
+    if (updates.length > 0) {
+      const updatePayloads: WebflowItemUpdate[] = updates.map((plan) => ({
+        id: plan.existing!.id,
         isDraft: false,
         isArchived: false,
-        fieldData: { ...fieldDataFor(plan), slug },
-      };
-    });
-    const createdItems = await webflow.createItems(createPayloads);
-    createdItems.forEach((item, i) => {
-      const plan = toCreate[i];
-      if (!plan) return;
-      publishIds.push(item.id);
-      report.created.push({
-        is24Id: plan.listing.id,
-        title: plan.listing.title,
-        slug: typeof item.fieldData?.slug === "string" ? item.fieldData.slug : undefined,
+        fieldData: fieldDataFor(plan),
+      }));
+      await webflow.updateItems(updatePayloads);
+      for (const plan of updates) {
+        publishIds.push(plan.existing!.id);
+        report.updated.push({
+          is24Id: plan.listing.id,
+          title: plan.listing.title,
+          webflowItemId: plan.existing!.id,
+        });
+      }
+      logger.info(`${updates.length} Items staged aktualisiert`);
+    }
+
+    // 11: Nur betroffene Items veröffentlichen (kein Site-Publish)
+    if (publishIds.length > 0) {
+      await webflow.publishItems(publishIds);
+      logger.info(`${publishIds.length} Items veröffentlicht`);
+    }
+  }
+
+  // Unveröffentlicht ein Item und markiert es als Entwurf (staged bleibt erhalten).
+  const retire = async (id: string, item: WebflowItem): Promise<boolean> => {
+    if (outOfTime()) {
+      report.pendingCount += 1;
+      return false;
+    }
+    try {
+      await webflow.unpublishItem(item.id);
+      await webflow.updateItems([{ id: item.id, isDraft: true, fieldData: {} }]);
+      report.unpublished.push({
+        is24Id: id,
+        title: typeof item.fieldData.name === "string" ? item.fieldData.name : undefined,
         webflowItemId: item.id,
       });
-    });
-    logger.info(`${createdItems.length} Items staged erstellt`);
-  }
-
-  // ── 10: Geänderte Inserate staged aktualisieren (Slug bleibt stabil) ──────
-  if (toUpdate.length > 0) {
-    const updatePayloads: WebflowItemUpdate[] = toUpdate.map((plan) => ({
-      id: plan.existing!.id,
-      isDraft: false,
-      isArchived: false,
-      fieldData: fieldDataFor(plan),
-    }));
-    await webflow.updateItems(updatePayloads);
-    for (const plan of toUpdate) {
-      publishIds.push(plan.existing!.id);
-      report.updated.push({
-        is24Id: plan.listing.id,
-        title: plan.listing.title,
-        webflowItemId: plan.existing!.id,
-      });
+      return true;
+    } catch (err) {
+      report.error(`Unpublish für Item ${item.id} (is24-id ${id}) fehlgeschlagen: ${errorMessage(err)}`);
+      return false;
     }
-    logger.info(`${toUpdate.length} Items staged aktualisiert`);
-  }
+  };
 
-  // ── 11: Nur betroffene Items veröffentlichen (kein Site-Publish) ──────────
-  if (publishIds.length > 0) {
-    await webflow.publishItems(publishIds);
-    logger.info(`${publishIds.length} Items veröffentlicht`);
-  }
+  // ── 12: Live-Duplikate bereinigen (unabhängig von INACTIVE_ACTION) ────────
+  for (const [id, item] of duplicatesToRetire) await retire(id, item);
 
-  // ── 12: Verschwundene Inserate behandeln ──────────────────────────────────
+  // ── 13: Verschwundene Inserate behandeln ──────────────────────────────────
   if (stale.length > 0) {
     if (opts.inactiveAction === "ignore") {
       for (const [id, item] of stale) {
@@ -277,22 +347,23 @@ async function execute(deps: SyncDeps, opts: SyncOptions, report: ReportBuilder)
         report.wouldUnpublish.push({ is24Id: id, webflowItemId: item.id });
       }
     } else {
-      for (const [id, item] of stale) {
-        try {
-          await webflow.unpublishItem(item.id);
-          await webflow.updateItems([{ id: item.id, isDraft: true, fieldData: {} }]);
-          report.unpublished.push({
-            is24Id: id,
-            title: typeof item.fieldData.name === "string" ? item.fieldData.name : undefined,
-            webflowItemId: item.id,
-          });
-        } catch (err) {
-          report.error(`Unpublish für Item ${item.id} (is24-id ${id}) fehlgeschlagen: ${errorMessage(err)}`);
-        }
-      }
-      logger.info(`${report.unpublished.length} Items unveröffentlicht (staged bleibt erhalten)`);
+      let count = 0;
+      for (const [id, item] of stale) if (await retire(id, item)) count++;
+      logger.info(`${count} Items unveröffentlicht (staged bleibt erhalten)`);
     }
   }
 
+  if (report.pendingCount > 0) {
+    logger.info(`Lauf wegen Zeitbudget vorzeitig beendet`, { pending: report.pendingCount });
+  }
   return report.build(report.errors.length === 0);
+}
+
+/** Maßgebliches Item bei Duplikaten: zuerst nicht-Entwurf, dann ältestes. */
+function compareCanonical(a: WebflowItem, b: WebflowItem): number {
+  if (a.isDraft !== b.isDraft) return a.isDraft ? 1 : -1;
+  if (a.createdOn && b.createdOn && a.createdOn !== b.createdOn) {
+    return a.createdOn < b.createdOn ? -1 : 1;
+  }
+  return 0;
 }

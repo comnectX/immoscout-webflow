@@ -230,6 +230,21 @@ describe("runSync — Idempotenz und Duplikatschutz", () => {
     const report = await run(okSource([l]), webflow);
     expect(report.warnings.some((w) => w.includes("Duplikat"))).toBe(true);
     expect(report.createCount).toBe(0);
+    // Die überzählige live Kopie wird unveröffentlicht (nicht gelöscht).
+    expect(webflow.unpublishedIds).toEqual(["wf-b"]);
+  });
+
+  it("behält bei Duplikaten das älteste Item und lässt Entwurfs-Kopien in Ruhe", async () => {
+    const l = listing("1");
+    const hash = await computeListingHash(l);
+    const webflow = new FakeWebflow([
+      { ...existingItem("1", hash, "wf-neu"), createdOn: "2026-10-18T13:35:29Z" },
+      { ...existingItem("1", hash, "wf-alt"), createdOn: "2026-10-18T13:31:48Z" },
+      { ...existingItem("1", hash, "wf-entwurf"), isDraft: true, createdOn: "2026-01-01T00:00:00Z" },
+    ]);
+    const report = await run(okSource([l]), webflow);
+    expect(report.unchanged[0]?.webflowItemId).toBe("wf-alt");
+    expect(webflow.unpublishedIds).toEqual(["wf-neu"]);
   });
 
   it("reaktiviert ein zuvor unveröffentlichtes Item, wenn das Inserat zurückkehrt", async () => {
@@ -252,6 +267,14 @@ describe("runSync — Unpublishing & Sicherheitsregeln", () => {
     expect(webflow.unpublishedIds).toEqual(["wf-existing-99"]);
     // Staged-Item bleibt erhalten und wird als Entwurf markiert.
     expect(webflow.updatedCalls.flat().some((u) => u.id === "wf-existing-99" && u.isDraft === true)).toBe(true);
+  });
+
+  it("unpublisht bereits als Entwurf markierte Items nicht bei jedem Lauf erneut", async () => {
+    const webflow = new FakeWebflow([{ ...existingItem("99", "hash"), isDraft: true }]);
+    const report = await run(okSource([]), webflow);
+
+    expect(webflow.writeCount).toBe(0);
+    expect(report.unpublishCount).toBe(0);
   });
 
   it("fasst manuell erstellte Items ohne is24-id niemals an", async () => {
@@ -300,5 +323,43 @@ describe("runSync — Unpublishing & Sicherheitsregeln", () => {
     expect(webflow.unpublishedIds).toEqual([]);
     expect(report.unpublishCount).toBe(0);
     expect(report.wouldUnpublish).toHaveLength(1);
+  });
+});
+
+describe("runSync — Zeitbudget", () => {
+  it("bricht nach erschöpftem Budget ab, meldet ausstehende Inserate und setzt im nächsten Lauf fort", async () => {
+    const listings = ["1", "2", "3", "4", "5", "6"].map((id) => listing(id));
+    const webflow = new FakeWebflow([]);
+    // Jeder Create-Batch "dauert" so lange, dass das Budget danach erschöpft ist.
+    const originalCreate = webflow.createItems.bind(webflow);
+    webflow.createItems = async (items) => {
+      await new Promise((r) => setTimeout(r, 30));
+      return originalCreate(items);
+    };
+
+    const first = await run(okSource(listings), webflow, { timeBudgetMs: 20 });
+    expect(first.success).toBe(true);
+    expect(first.complete).toBe(false);
+    expect(first.createCount).toBe(4); // ein Block = 2 × maxConcurrency
+    expect(first.pendingCount).toBe(2);
+    expect(webflow.publishedIds).toHaveLength(4); // Block ist vollständig veröffentlicht
+
+    // Zweiter Lauf sieht die angelegten Items und legt nur den Rest an.
+    webflow.items = webflow.createdCalls.flat().map((w, i) => ({
+      id: webflow.publishedIds[i]!,
+      isDraft: false,
+      isArchived: false,
+      fieldData: w.fieldData,
+    }));
+    const second = await run(okSource(listings), webflow, { timeBudgetMs: 10_000 });
+    expect(second.complete).toBe(true);
+    expect(second.createCount).toBe(2);
+    expect(second.unchangedCount).toBe(4);
+  });
+
+  it("ohne Budget ist jeder Lauf vollständig", async () => {
+    const report = await run(okSource([listing("1")]), new FakeWebflow([]));
+    expect(report.complete).toBe(true);
+    expect(report.pendingCount).toBe(0);
   });
 });

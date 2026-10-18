@@ -8,6 +8,8 @@ export interface RetryOptions {
   logger?: Logger;
   /** Beschreibung fürs Log, z. B. "is24 GET /realestate". */
   label?: string;
+  /** Timeout pro Versuch in ms (Default 30 s); ein Timeout zählt als Netzwerkfehler. */
+  timeoutMs?: number;
 }
 
 const RETRYABLE = (status: number) => status === 429 || (status >= 500 && status <= 599);
@@ -37,12 +39,14 @@ export async function fetchWithRetry(
   const maxAttempts = opts.maxAttempts ?? 3;
   const base = opts.baseDelayMs ?? 500;
   const maxDelay = opts.maxDelayMs ?? 15_000;
+  const timeoutMs = opts.timeoutMs ?? 30_000;
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     let res: Response | undefined;
     try {
-      res = await fetch(url, init);
+      // Ohne Timeout könnte ein hängender Request den ganzen Lauf blockieren.
+      res = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
     } catch (err) {
       lastError = err;
     }
